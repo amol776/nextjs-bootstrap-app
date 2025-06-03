@@ -237,33 +237,188 @@ def main():
 
     # Source Selection
     st.subheader("1. Select Source and Target")
-    col1, col2 = st.columns(2)
     
-    with col1:
-        st.markdown("### Source")
-        source_type = st.selectbox("Select Source Type", SUPPORTED_SOURCES, key="source_type")
-        
-        # File upload or connection parameters for source
-        source_data = None
-        if source_type in ['CSV file', 'DAT file', 'Parquet file', 'Flat files inside zipped folder']:
-            source_file = st.file_uploader(f"Upload {source_type}", key="source_file")
-            if source_type in ['CSV file', 'DAT file', 'Flat files inside zipped folder']:
-                source_delimiter = st.text_input("Source Delimiter", ",", key="source_delimiter")
-        else:
-            source_params = get_connection_inputs(source_type)
+    # Add sample data option with clear UI
+    st.markdown("""
+        <style>
+        .sample-data-section {
+            padding: 1rem;
+            margin-bottom: 2rem;
+            border-radius: 0.5rem;
+            background-color: #f8f9fa;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    # Sample data section
+    with st.container():
+        st.markdown('<div class="sample-data-section">', unsafe_allow_html=True)
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            use_sample = st.checkbox("📊 Use Sample Data for Testing", 
+                                   value=False,
+                                   help="Load pre-configured sample data to test the comparison functionality")
+        with col2:
+            if st.button("Load Sample", disabled=not use_sample):
+                try:
+                    # Get the current directory
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    
+                    # Construct paths to sample data files
+                    source_path = os.path.join(current_dir, "sample_data", "source.csv")
+                    target_path = os.path.join(current_dir, "sample_data", "target.csv")
+                    
+                    # Load the data
+                    source_data = pd.read_csv(source_path)
+                    target_data = pd.read_csv(target_path)
+                    
+                    # Store in session state
+                    st.session_state.source_data = source_data
+                    st.session_state.target_data = target_data
+                    
+                    st.success("✅ Sample data loaded successfully!")
+                    
+                    # Show preview of sample data
+                    st.markdown("### Data Preview")
+                    tab1, tab2 = st.tabs(["Source Data", "Target Data"])
+                    with tab1:
+                        st.dataframe(source_data.head(), use_container_width=True)
+                    with tab2:
+                        st.dataframe(target_data.head(), use_container_width=True)
+                    
+                    # Initialize comparison engine
+                    engine = ComparisonEngine(source_data, target_data)
+                    
+                    # Get automatic mapping
+                    if 'column_mapping' not in st.session_state:
+                        st.session_state.column_mapping = engine.auto_map_columns()
+                    
+                    # Show mapping section
+                    st.subheader("2. Column Mapping")
+                    st.markdown("Configure how columns should be compared between source and target data.")
+                    
+                    # Create mapping editor with enhanced UI
+                    mapping_data = pd.DataFrame(st.session_state.column_mapping)
+                    edited_mapping = st.data_editor(
+                        mapping_data,
+                        column_config={
+                            "source": st.column_config.TextColumn(
+                                "Source Column",
+                                disabled=True,
+                                help="Original column name from source data"
+                            ),
+                            "target": st.column_config.SelectboxColumn(
+                                "Target Column",
+                                options=[""] + list(target_data.columns),
+                                help="Select matching column from target data"
+                            ),
+                            "join": st.column_config.CheckboxColumn(
+                                "Join Column",
+                                help="Use this column to match records between source and target"
+                            ),
+                            "data_type": st.column_config.SelectboxColumn(
+                                "Data Type",
+                                options=list(TYPE_MAPPING.values()),
+                                help="Data type for comparison"
+                            ),
+                            "exclude": st.column_config.CheckboxColumn(
+                                "Exclude",
+                                help="Exclude this column from comparison"
+                            )
+                        },
+                        hide_index=True,
+                        key="sample_mapping_editor"  # Changed key to be unique
+                    )
+                    
+                    # Update session state with edited mapping
+                    st.session_state.column_mapping = edited_mapping.to_dict('records')
+                    
+                    # Show mapping summary
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        mapped_cols = sum(1 for m in st.session_state.column_mapping if m['target'])
+                        st.metric("Mapped Columns", f"{mapped_cols}/{len(st.session_state.column_mapping)}")
+                    with col2:
+                        join_cols = sum(1 for m in st.session_state.column_mapping if m['join'])
+                        st.metric("Join Columns", join_cols)
+                    with col3:
+                        excluded_cols = sum(1 for m in st.session_state.column_mapping if m['exclude'])
+                        st.metric("Excluded Columns", excluded_cols)
+                    
+                    # Compare button
+                    if join_cols > 0:
+                        if st.button("Compare Data"):
+                            try:
+                                # Get selected join columns
+                                join_columns = [m['source'] for m in st.session_state.column_mapping if m['join']]
+                                
+                                # Set mapping in comparison engine
+                                engine.set_mapping(st.session_state.column_mapping, join_columns)
+                                
+                                # Perform comparison
+                                comparison_results = engine.compare()
+                                st.session_state.comparison_results = comparison_results
+                                
+                                # Show results
+                                st.subheader("3. Comparison Results")
+                                
+                                # Summary statistics
+                                result_col1, result_col2, result_col3 = st.columns(3)
+                                with result_col1:
+                                    st.metric("Rows Match", "Yes" if comparison_results['rows_match'] else "No")
+                                with result_col2:
+                                    st.metric("Columns Match", "Yes" if comparison_results['columns_match'] else "No")
+                                with result_col3:
+                                    st.metric("Overall Match", "Yes" if comparison_results['match_status'] else "No")
+                                
+                                # Detailed report
+                                with st.expander("View Detailed Report"):
+                                    st.text(comparison_results['datacompy_report'])
+                                    
+                                    if len(comparison_results['source_unmatched_rows']) > 0:
+                                        st.markdown("### Unmatched Rows in Source")
+                                        st.dataframe(comparison_results['source_unmatched_rows'])
+                                        
+                                    if len(comparison_results['target_unmatched_rows']) > 0:
+                                        st.markdown("### Unmatched Rows in Target")
+                                        st.dataframe(comparison_results['target_unmatched_rows'])
+                                
+                            except Exception as e:
+                                st.error(f"Comparison failed: {str(e)}")
+                    else:
+                        st.warning("Please select at least one join column for comparison")
+                except Exception as e:
+                    st.error(f"Error loading sample data: {str(e)}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Manual data upload section
+    if not use_sample:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### Source")
+            source_type = st.selectbox("Select Source Type", SUPPORTED_SOURCES, key="source_type")
             
-    with col2:
-        st.markdown("### Target")
-        target_type = st.selectbox("Select Target Type", SUPPORTED_SOURCES, key="target_type")
-        
-        # File upload or connection parameters for target
-        target_data = None
-        if target_type in ['CSV file', 'DAT file', 'Parquet file', 'Flat files inside zipped folder']:
-            target_file = st.file_uploader(f"Upload {target_type}", key="target_file")
-            if target_type in ['CSV file', 'DAT file', 'Flat files inside zipped folder']:
-                target_delimiter = st.text_input("Target Delimiter", ",", key="target_delimiter")
-        else:
-            target_params = get_connection_inputs(target_type)
+            # File upload or connection parameters for source
+            source_data = None
+            if source_type in ['CSV file', 'DAT file', 'Parquet file', 'Flat files inside zipped folder']:
+                source_file = st.file_uploader(f"Upload {source_type}", key="source_file")
+                if source_type in ['CSV file', 'DAT file', 'Flat files inside zipped folder']:
+                    source_delimiter = st.text_input("Source Delimiter", ",", key="source_delimiter")
+            else:
+                source_params = get_connection_inputs(source_type)
+                
+        with col2:
+            st.markdown("### Target")
+            target_type = st.selectbox("Select Target Type", SUPPORTED_SOURCES, key="target_type")
+            
+            # File upload or connection parameters for target
+            target_data = None
+            if target_type in ['CSV file', 'DAT file', 'Parquet file', 'Flat files inside zipped folder']:
+                target_file = st.file_uploader(f"Upload {target_type}", key="target_file")
+                if target_type in ['CSV file', 'DAT file', 'Flat files inside zipped folder']:
+                    target_delimiter = st.text_input("Target Delimiter", ",", key="target_delimiter")
+            else:
+                target_params = get_connection_inputs(target_type)
 
     # Load Data button
     if st.button("Load Data"):
@@ -311,28 +466,84 @@ def main():
         if 'column_mapping' not in st.session_state:
             st.session_state.column_mapping = engine.auto_map_columns()
         
-        # Create mapping editor
+        # Column Mapping Section
+        st.markdown("### Column Mapping Configuration")
+        
+        # Add buttons for quick mapping actions
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("Auto-Map All"):
+                mapping_data = pd.DataFrame(engine.auto_map_columns())
+                st.session_state.column_mapping = mapping_data.to_dict('records')
+                st.success("Columns auto-mapped successfully!")
+                
+        with col2:
+            if st.button("Clear All Mappings"):
+                for mapping in st.session_state.column_mapping:
+                    mapping['target'] = ''
+                    mapping['join'] = False
+                    mapping['exclude'] = False
+                st.success("All mappings cleared!")
+                
+        with col3:
+            if st.button("Reset to Default"):
+                st.session_state.column_mapping = engine.auto_map_columns()
+                st.success("Mappings reset to default!")
+
+        # Create mapping editor with enhanced UI
+        st.markdown("#### Edit Column Mappings")
+        st.markdown("- Select target columns from dropdown")
+        st.markdown("- Check 'Join Column' for columns to use in matching records")
+        st.markdown("- Check 'Exclude' to ignore columns in comparison")
+        
         mapping_data = pd.DataFrame(st.session_state.column_mapping)
         edited_mapping = st.data_editor(
             mapping_data,
             column_config={
-                "source": st.column_config.TextColumn("Source Column", disabled=True),
+                "source": st.column_config.TextColumn(
+                    "Source Column",
+                    disabled=True,
+                    help="Original column name from source data"
+                ),
                 "target": st.column_config.SelectboxColumn(
                     "Target Column",
-                    options=[""] + list(st.session_state.target_data.columns)
+                    options=[""] + list(st.session_state.target_data.columns),
+                    help="Select matching column from target data"
                 ),
-                "join": st.column_config.CheckboxColumn("Join Column"),
+                "join": st.column_config.CheckboxColumn(
+                    "Join Column",
+                    help="Use this column to match records between source and target"
+                ),
                 "data_type": st.column_config.SelectboxColumn(
                     "Data Type",
-                    options=list(TYPE_MAPPING.values())
+                    options=list(TYPE_MAPPING.values()),
+                    help="Data type for comparison"
                 ),
-                "exclude": st.column_config.CheckboxColumn("Exclude")
+                "exclude": st.column_config.CheckboxColumn(
+                    "Exclude",
+                    help="Exclude this column from comparison"
+                )
             },
-            hide_index=True
+            hide_index=True,
+            key="mapping_editor"
         )
         
-        # Update session state
+        # Update session state with edited mapping
         st.session_state.column_mapping = edited_mapping.to_dict('records')
+        
+        # Show mapping summary
+        st.markdown("#### Mapping Summary")
+        mapped_cols = sum(1 for m in st.session_state.column_mapping if m['target'])
+        join_cols = sum(1 for m in st.session_state.column_mapping if m['join'])
+        excluded_cols = sum(1 for m in st.session_state.column_mapping if m['exclude'])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Mapped Columns", f"{mapped_cols}/{len(st.session_state.column_mapping)}")
+        with col2:
+            st.metric("Join Columns", join_cols)
+        with col3:
+            st.metric("Excluded Columns", excluded_cols)
         
         # Get selected join columns
         join_columns = [m['source'] for m in st.session_state.column_mapping if m['join']]
