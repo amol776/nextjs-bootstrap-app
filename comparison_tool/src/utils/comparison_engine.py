@@ -105,56 +105,86 @@ class ComparisonEngine:
         Returns:
             Dictionary containing comparison results
         """
-        source, target = self._prepare_dataframes()
-        
-        # Initialize comparison results
-        results = {
-            'match_status': False,
-            'rows_match': False,
-            'columns_match': False,
-            'datacompy_report': '',
-            'source_unmatched_rows': pd.DataFrame(),
-            'target_unmatched_rows': pd.DataFrame(),
-            'column_summary': self._generate_column_summary(source, target),
-            'row_counts': {
-                'source_name': 'Source',
-                'target_name': 'Target',
-                'source_count': len(source),
-                'target_count': len(target)
+        try:
+            source, target = self._prepare_dataframes()
+            
+            # Initialize comparison results
+            results = {
+                'match_status': False,
+                'rows_match': False,
+                'columns_match': False,
+                'datacompy_report': '',
+                'source_unmatched_rows': pd.DataFrame(),
+                'target_unmatched_rows': pd.DataFrame(),
+                'column_summary': self._generate_column_summary(source, target),
+                'row_counts': {
+                    'source_name': 'Source',
+                    'target_name': 'Target',
+                    'source_count': len(source),
+                    'target_count': len(target)
+                },
+                'distinct_values': {}  # Initialize distinct_values in results
             }
-        }
 
-        # Basic comparison checks
-        results['columns_match'] = set(source.columns) == set(target.columns)
-        results['rows_match'] = len(source) == len(target)
+            # Basic comparison checks
+            results['columns_match'] = set(source.columns) == set(target.columns)
+            results['rows_match'] = len(source) == len(target)
 
-        # Detailed comparison
-        if self.join_columns:
-            # Find unmatched rows
-            merged = pd.merge(source, target, on=self.join_columns, how='outer', indicator=True)
-            results['source_unmatched_rows'] = merged[merged['_merge'] == 'left_only'].drop('_merge', axis=1)
-            results['target_unmatched_rows'] = merged[merged['_merge'] == 'right_only'].drop('_merge', axis=1)
-            
-            # Generate comparison report
-            report_lines = []
-            report_lines.append("Comparison Report")
-            report_lines.append("-" * 50)
-            report_lines.append(f"Source rows: {len(source)}")
-            report_lines.append(f"Target rows: {len(target)}")
-            report_lines.append(f"Unmatched in source: {len(results['source_unmatched_rows'])}")
-            report_lines.append(f"Unmatched in target: {len(results['target_unmatched_rows'])}")
-            
-            results['datacompy_report'] = "\n".join(report_lines)
-            
-            # Overall match status
-            results['match_status'] = (
-                results['columns_match'] and 
-                results['rows_match'] and 
-                len(results['source_unmatched_rows']) == 0 and
-                len(results['target_unmatched_rows']) == 0
-            )
+            # Get distinct values for non-numeric columns
+            try:
+                results['distinct_values'] = self.get_distinct_values()
+            except Exception as e:
+                logger.warning(f"Error getting distinct values: {str(e)}")
+                results['distinct_values'] = {}
 
-        return results
+            # Detailed comparison
+            if self.join_columns:
+                try:
+                    # Find unmatched rows
+                    merged = pd.merge(source, target, on=self.join_columns, how='outer', indicator=True)
+                    results['source_unmatched_rows'] = merged[merged['_merge'] == 'left_only'].drop('_merge', axis=1)
+                    results['target_unmatched_rows'] = merged[merged['_merge'] == 'right_only'].drop('_merge', axis=1)
+                    
+                    # Generate comparison report
+                    report_lines = []
+                    report_lines.append("Comparison Report")
+                    report_lines.append("-" * 50)
+                    report_lines.append(f"Source rows: {len(source)}")
+                    report_lines.append(f"Target rows: {len(target)}")
+                    report_lines.append(f"Unmatched in source: {len(results['source_unmatched_rows'])}")
+                    report_lines.append(f"Unmatched in target: {len(results['target_unmatched_rows'])}")
+                    
+                    # Add value distribution for join columns
+                    if results['distinct_values']:
+                        report_lines.append("\nValue Distribution in Join Columns:")
+                        for col in self.join_columns:
+                            if col in results['distinct_values']:
+                                report_lines.append(f"\n{col}:")
+                                report_lines.append(f"Source unique values: {results['distinct_values'][col]['source_count']}")
+                                report_lines.append(f"Target unique values: {results['distinct_values'][col]['target_count']}")
+                    
+                    results['datacompy_report'] = "\n".join(report_lines)
+                    
+                    # Overall match status
+                    results['match_status'] = (
+                        results['columns_match'] and 
+                        results['rows_match'] and
+                        len(results['source_unmatched_rows']) == 0 and
+                        len(results['target_unmatched_rows']) == 0
+                    )
+                except Exception as e:
+                    logger.error(f"Error in detailed comparison: {str(e)}")
+                    results['datacompy_report'] = f"Error in comparison: {str(e)}"
+                    results['match_status'] = False
+
+            return results
+        except Exception as e:
+            logger.error(f"Error in compare method: {str(e)}")
+            return {
+                'match_status': False,
+                'error': str(e),
+                'datacompy_report': f"Comparison failed: {str(e)}"
+            }
 
     def _generate_column_summary(self, source: pd.DataFrame, 
                                target: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
@@ -239,24 +269,36 @@ class ComparisonEngine:
         Returns:
             Dictionary containing distinct values and counts for each column
         """
-        source, target = self._prepare_dataframes()
-        
-        if not columns:
-            columns = [col for col in source.columns 
-                      if not np.issubdtype(source[col].dtype, np.number)]
+        try:
+            source, target = self._prepare_dataframes()
+            
+            if not columns:
+                # Get all columns that exist in both dataframes
+                columns = [col for col in source.columns 
+                        if col in target.columns and not np.issubdtype(source[col].dtype, np.number)]
+            
+            if not columns:  # If still no columns, return empty dict
+                return {}
 
-        distinct_values = {}
-        for col in columns:
-            if col in source.columns and col in target.columns:
-                source_distinct = source[col].value_counts().to_dict()
-                target_distinct = target[col].value_counts().to_dict()
-                
-                distinct_values[col] = {
-                    'source_values': source_distinct,
-                    'target_values': target_distinct,
-                    'source_count': len(source_distinct),
-                    'target_count': len(target_distinct),
-                    'matching': set(source_distinct.keys()) == set(target_distinct.keys())
-                }
+            distinct_values = {}
+            for col in columns:
+                try:
+                    if col in source.columns and col in target.columns:
+                        source_distinct = source[col].value_counts().to_dict()
+                        target_distinct = target[col].value_counts().to_dict()
+                        
+                        distinct_values[col] = {
+                            'source_values': source_distinct,
+                            'target_values': target_distinct,
+                            'source_count': len(source_distinct),
+                            'target_count': len(target_distinct),
+                            'matching': set(source_distinct.keys()) == set(target_distinct.keys())
+                        }
+                except Exception as e:
+                    logger.warning(f"Error processing column {col}: {str(e)}")
+                    continue
 
-        return distinct_values
+            return distinct_values
+        except Exception as e:
+            logger.error(f"Error in get_distinct_values: {str(e)}")
+            return {}
