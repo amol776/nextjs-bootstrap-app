@@ -12,7 +12,7 @@ from utils.comparison_engine import ComparisonEngine
 from reports.report_generator import ReportGenerator
 
 # Constants
-SUPPORTED_SOURCES = [
+SUPPORTED_SOURCES = [s
     'CSV file',
     'DAT file',
     'SQL Server',
